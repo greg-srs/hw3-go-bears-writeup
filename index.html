@@ -1,5 +1,6 @@
 <html>
 	<head>
+		<meta charset="utf-8">
 		<script src='https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.4/MathJax.js?config=default'></script>
 		<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&display=swap" rel="stylesheet">
 		<style>
@@ -28,7 +29,7 @@
 	<body>
 		<div class="container">
 		<h1>CS184/284A Fall 2026 Homework 3 Write-Up</h1>
-		<div style="text-align: center;">Names: </div>
+		<div style="text-align: center;">Names: Arian Namazi and Grégoire Serres</div>
 
 		<br>
 
@@ -48,34 +49,58 @@
 		Give a high-level overview of what you implemented in this homework. Think about what you've built as a whole. Share your thoughts on what interesting things you've learned from completing the homework.
 
 		<h2>Part 1: Ray Generation and Scene Intersection</h2>
-		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
 
-		<p>Here is an example 2x2 gridlike structure using an HTML table. Each <b>tr</b> is a row and each <b>td</b> is a column in that row. You might find this useful for framing and showing your result images in an organized fashion.</p>
+		<h3>Ray generation and primitive intersection</h3>
+		<p>For every pixel we want to estimate how much light reaches the camera through it. In Part 1 this comes down to two steps: build rays that leave the camera through the pixel, then find the first surface each ray hits.</p>
+
+		<p><b>Sampling a pixel.</b> In <code>PathTracer::raytrace_pixel(x, y)</code>, \((x, y)\) is the bottom-left corner of the pixel in image space. We draw <code>ns_aa</code> random offsets in \([0,1]^2\) with <code>gridSampler->get_sample()</code>, add each one to the corner, and divide by <code>sampleBuffer.w</code> and <code>sampleBuffer.h</code> to get normalized coordinates in \([0,1]^2\). Each point is turned into a ray by the camera and traced with <code>est_radiance_global_illumination</code>. We average the returned radiances and store the result with <code>sampleBuffer.update_pixel</code>. Using several random positions inside the pixel instead of only its center is what gives us antialiasing.</p>
+
+		<p><b>Camera rays.</b> <code>Camera::generate_ray(x, y)</code> works in camera space, where the camera sits at the origin and looks down \(-Z\). The sensor is the plane \(z = -1\), going from \((-\tan\frac{hFov}{2}, -\tan\frac{vFov}{2}, -1)\) at the bottom left to \((\tan\frac{hFov}{2}, \tan\frac{vFov}{2}, -1)\) at the top right. The normalized point is mapped linearly onto that rectangle:
+		\[ d_{cam} = \left( (2x-1)\tan\tfrac{hFov}{2},\ (2y-1)\tan\tfrac{vFov}{2},\ -1 \right) \]
+		<code>hFov</code> and <code>vFov</code> are given in degrees, so we convert them to radians first. We then rotate \(d_{cam}\) to world space with <code>c2w</code> and normalize it. The origin of the ray is <code>pos</code>, the camera position, which is already in world coordinates. Finally we set <code>min_t = nClip</code> and <code>max_t = fClip</code>.</p>
+
+		<p><b>Intersecting primitives.</b> A ray is \(r(t) = o + t\,d\) with \(t\) between <code>min_t</code> and <code>max_t</code>. Every primitive has <code>has_intersection</code>, which only says whether the ray hits it, and <code>intersect</code>, which also fills an <code>Intersection</code> with \(t\), the normal, the primitive and its BSDF. When a hit is accepted we set <code>max_t</code> to its \(t\). Any primitive tested later then has to be closer to count, so at the end the <code>Intersection</code> holds the closest hit no matter in which order the primitives were tested. For now the hit is colored with its normal, using \(n \cdot 0.5 + 0.5\) as RGB.</p>
+
+		<p><b>Spheres.</b> Plugging \(r(t)\) into \(\|p - c\|^2 = R^2\) gives a quadratic \(at^2 + bt + c' = 0\) with \(a = d \cdot d\), \(b = 2(o-c)\cdot d\) and \(c' = \|o-c\|^2 - R^2\). <code>Sphere::test</code> returns false if the discriminant is negative, otherwise it returns both roots \(t_1 \le t_2\). We keep \(t_1\) if it is in [<code>min_t</code>, <code>max_t</code>], otherwise \(t_2\) if it is (this happens when the ray starts inside the sphere), otherwise there is no hit. The normal is \((p - c)/\|p - c\|\).</p>
+
+		<h3>Triangle intersection algorithm</h3>
+		<p>We implemented the Möller–Trumbore algorithm from lecture. A point of the triangle can be written with barycentric coordinates as \((1-b_1-b_2)p_1 + b_1p_2 + b_2p_3\). Setting it equal to \(o + t\,d\) gives three equations (x, y, z) with three unknowns \(t, b_1, b_2\). With \(E_1 = p_2 - p_1\), \(E_2 = p_3 - p_1\), \(S = o - p_1\), \(S_1 = d \times E_2\) and \(S_2 = S \times E_1\), Cramer's rule gives
+		\[ \begin{pmatrix} t \ b_1 \ b_2 \end{pmatrix} = \frac{1}{S_1 \cdot E_1} \begin{pmatrix} S_2 \cdot E_2 \ S_1 \cdot S \ S_2 \cdot d \end{pmatrix} \]
+		We compute \(S_1 \cdot E_1\) once and divide by it three times. If it is close to zero (we use \(|S_1 \cdot E_1| \le 10^{-8}\)), the ray is parallel to the triangle and we return false. Otherwise the hit is valid when \(t\) is in [<code>min_t</code>, <code>max_t</code>] and \(b_1 \ge 0\), \(b_2 \ge 0\), \(1 - b_1 - b_2 \ge 0\), meaning the point is inside the triangle and not just in its plane. In that case we set <code>max_t = t</code>, and <code>intersect</code> also fills the <code>Intersection</code>: \(t\), <code>this</code>, <code>get_bsdf()</code>, and the normal interpolated from the vertex normals with the same weights, \(n = (1-b_1-b_2)n_1 + b_1n_2 + b_2n_3\).</p>
+
+		<h3>Normal shading on small .dae files</h3>
 		<div style="display: flex; flex-direction: column; align-items: center;">
 			<table style="width: 100%; text-align: center; border-collapse: collapse;">
 			  <tr>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/p1_CBempty.png" style="width: 95%; max-width: 480px;"/>
+				  <figcaption>CBempty.dae: the vertex normals of a wall are all equal, so each wall has a single color.</figcaption>
 				</td>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/p1_CBspheres_lambertian.png" style="width: 95%; max-width: 480px;"/>
+				  <figcaption>CBspheres_lambertian.dae: the sphere normals change smoothly across the surface.</figcaption>
 				</td>
 			  </tr>
 			  <tr>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/p1_banana.png" style="width: 95%; max-width: 480px;"/>
+				  <figcaption>banana.dae (2,458 triangles).</figcaption>
 				</td>
 				<td style="text-align: center;">
-				  <img src="assets/cornell.png" width="400px"/>
-				  <figcaption>Caption goes here.</figcaption>
+				  <img src="assets/p1_cube.png" style="width: 95%; max-width: 480px;"/>
+				  <figcaption>cube.dae: one face seen from the front. The gradient comes from interpolating the vertex normals.</figcaption>
 				</td>
 			  </tr>
 			</table>
 		</div>
-		
+		<p>Without a BVH, banana.dae took 32.7 s to render because each ray is tested against all 2,458 triangles, which is what Part 2 fixes.</p>
+
+		<h3>Problems we ran into</h3>
+		<ul>
+			<li>We first wrote <code>normal(t1)</code> instead of <code>normal(r.o + t1 * r.d)</code>. It compiled anyway because <code>Vector3D</code> has a constructor that takes a single <code>double</code>, so the normal was computed at the point \((t_1, t_1, t_1)\).</li>
+			<li>Our first sphere code used \(t_2\) as soon as \(t_1\) was out of range, without checking \(t_2\). This accepted spheres behind the camera, and for a sphere hidden behind an object already hit it made <code>max_t</code> larger instead of smaller.</li>
+		</ul>
+
 		<h2>Part 2: Bounding Volume Hierarchy</h2>
 		Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia deserunt mollit anim id est laborum.
 
